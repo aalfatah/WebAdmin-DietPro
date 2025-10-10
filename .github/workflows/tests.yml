@@ -17,9 +17,14 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
-      fail-fast: true
+      fail-fast: false  # Diubah ke false agar job lain tetap berjalan meski satu gagal
       matrix:
         php: [8.2, 8.3]
+        include:
+          - php: 8.2
+            experimental: false
+          - php: 8.3
+            experimental: false
 
     name: PHP ${{ matrix.php }}
 
@@ -31,17 +36,68 @@ jobs:
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: dom, curl, libxml, mbstring, zip, pcntl, pdo, sqlite, pdo_sqlite
+          extensions: dom, curl, libxml, mbstring, zip, pcntl, pdo, sqlite, pdo_sqlite, bcmath, ctype, fileinfo, json, tokenizer, xml
           coverage: none
+          tools: composer:v2
+
+      - name: Validate composer.json and composer.lock
+        run: composer validate --strict
+
+      - name: Get Composer Cache Directory
+        id: composer-cache
+        run: |
+          echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache Composer packages
+        uses: actions/cache@v3
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-php-${{ matrix.php }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-php-${{ matrix.php }}-composer-
 
       - name: Install Composer dependencies
-        run: composer install -q --no-ansi --no-interaction --no-scripts --no-progress --prefer-dist
+        run: |
+          composer install -q --no-ansi --no-interaction --no-scripts --no-progress --prefer-dist
+          composer dump-autoload --optimize
 
-      - name: Copy environment file
-        run: cp .env.example .env
+      - name: Prepare Application
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+          mkdir -p database
+          touch database/database.sqlite
 
-      - name: Generate app key
-        run: php artisan key:generate
+      - name: Set environment for testing
+        run: |
+          echo "DB_CONNECTION=sqlite" >> .env
+          echo "DB_DATABASE=database/database.sqlite" >> .env
+          echo "APP_ENV=testing" >> .env
+          echo "APP_DEBUG=true" >> .env
+          echo "CACHE_DRIVER=array" >> .env
+          echo "SESSION_DRIVER=array" >> .env
+          echo "QUEUE_DRIVER=sync" >> .env
+
+      - name: Show environment configuration
+        run: cat .env
+
+      - name: Run database migrations
+        run: php artisan migrate --force
+
+      - name: Clear configuration cache
+        run: php artisan config:clear
 
       - name: Execute tests
-        run: vendor/bin/phpunit
+        run: vendor/bin/phpunit --verbose
+        env:
+          XDEBUG_MODE: coverage
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        if: failure()
+        with:
+          name: test-results-php-${{ matrix.php }}
+          path: |
+            storage/logs/
+            tests/Browser/console/
+          retention-days: 7
